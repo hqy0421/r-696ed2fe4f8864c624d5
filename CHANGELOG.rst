@@ -34,6 +34,8 @@ Changed
 - chore: switched codespaces and github actions to use pyproject.toml for env, removed req.text file
 - feat: added min/max version testing in github actions
 - chore: removed cap on polars version
+- feat: added unseen_level_name argument to GroupRareLevelsTransformer, so levels grouped as rare during training are kept distinct from levels unseen in new data
+- feat: added additional_categories argument to OneHotEncodingTransformer to always generate fixed dummy columns for specified levels, including levels absent from training data
 
 5.0.0 (19/11/2026)
 -------------------

@@ -80,9 +80,15 @@ class GroupRareLevelsTransformer(BaseTransformer, WeightColumnMixin):
     unseen_levels_to_rare : bool
         If True, unseen levels in new data will be passed to rare, if set to false they will be left unchanged.
 
+    unseen_level_name : str or None
+        If set, levels in new data that were not present in the training data will be
+        grouped into a separate level with this name, keeping them distinct from levels
+        grouped into rare_level_name during training. The two signals are therefore kept
+        separate rather than unseen levels being merged into the rare level.
+
     training_data_levels : dict[set]
         Dictionary containing the set of values present in the training data for each column in self.columns. It
-        will only exist in if unseen_levels_to_rare is set to False.
+        will only exist in if unseen_levels_to_rare is set to False or unseen_level_name is set.
 
     built_from_json: bool
         indicates if transformer was reconstructed from json, which limits it's supported
@@ -132,6 +138,7 @@ class GroupRareLevelsTransformer(BaseTransformer, WeightColumnMixin):
         rare_level_name: str | ListOfStrs = "rare",
         record_rare_levels: bool = True,
         unseen_levels_to_rare: bool = True,
+        unseen_level_name: str | None = None,
         **kwargs: bool,
     ) -> None:
         """Initialise class instance.
@@ -162,12 +169,34 @@ class GroupRareLevelsTransformer(BaseTransformer, WeightColumnMixin):
 
         unseen_levels_to_rare : bool, default = True
             If True, unseen levels in new data will be passed to rare, if set to false they will be left unchanged.
+            Ignored if unseen_level_name is set.
+
+        unseen_level_name : str or None, default = None
+            If set, levels in new data not present in the training data are grouped into a separate
+            level with this name instead of being merged into rare_level_name. This keeps levels grouped
+            as rare during training distinct from levels unseen at scoring time. Must not equal
+            rare_level_name and is incompatible with unseen_levels_to_rare=False.
 
         **kwargs
             Arbitrary keyword arguments passed onto BaseTransformer.init method.
 
+        Raises
+        ------
+        ValueError: if unseen_level_name is set with unseen_levels_to_rare=False or
+            unseen_level_name equals rare_level_name
+
         """
         super().__init__(columns=columns, **kwargs)
+
+        if unseen_level_name is not None and not unseen_levels_to_rare:
+            msg = f"{self.classname()}: unseen_level_name is incompatible with unseen_levels_to_rare=False"
+            raise ValueError(msg)
+
+        if unseen_level_name == rare_level_name:
+            msg = (
+                f"{self.classname()}: unseen_level_name must not equal rare_level_name"
+            )
+            raise ValueError(msg)
 
         self.cut_off_percent = cut_off_percent
 
@@ -178,6 +207,8 @@ class GroupRareLevelsTransformer(BaseTransformer, WeightColumnMixin):
         self.record_rare_levels = record_rare_levels
 
         self.unseen_levels_to_rare = unseen_levels_to_rare
+
+        self.unseen_level_name = unseen_level_name
 
     @block_from_json
     def to_json(self) -> dict[str, dict[str, Any]]:
@@ -205,7 +236,7 @@ class GroupRareLevelsTransformer(BaseTransformer, WeightColumnMixin):
                                    unseen_levels_to_rare=False)
 
         >>> x.to_json()
-        {'tubular_version': ..., 'classname': 'GroupRareLevelsTransformer', 'init': {'columns': ['b', 'c'], 'copy': False, 'verbose': False, 'return_native': True, 'cut_off_percent': 0.4, 'weights_column': None, 'rare_level_name': 'rare', 'record_rare_levels': True, 'unseen_levels_to_rare': False}, 'fit': {'is_fitted_': True, 'non_rare_levels': {'b': ['w'], 'c': ['a']}, 'training_data_levels': {'b': ['w', 'x', 'y', 'z'], 'c': ['a', 'b', 'c']}, 'rare_levels_record': {'b': ['x', 'y', 'z'], 'c': ['b', 'c']}}}
+        {'tubular_version': ..., 'classname': 'GroupRareLevelsTransformer', 'init': {'columns': ['b', 'c'], 'copy': False, 'verbose': False, 'return_native': True, 'cut_off_percent': 0.4, 'weights_column': None, 'rare_level_name': 'rare', 'record_rare_levels': True, 'unseen_levels_to_rare': False, 'unseen_level_name': None}, 'fit': {'is_fitted_': True, 'non_rare_levels': {'b': ['w'], 'c': ['a']}, 'training_data_levels': {'b': ['w', 'x', 'y', 'z'], 'c': ['a', 'b', 'c']}, 'rare_levels_record': {'b': ['x', 'y', 'z'], 'c': ['b', 'c']}}}
 
         ```
 
@@ -220,10 +251,11 @@ class GroupRareLevelsTransformer(BaseTransformer, WeightColumnMixin):
                 "rare_level_name": self.rare_level_name,
                 "record_rare_levels": self.record_rare_levels,
                 "unseen_levels_to_rare": self.unseen_levels_to_rare,
+                "unseen_level_name": self.unseen_level_name,
             },
         )
         json_dict["fit"]["non_rare_levels"] = _sort_dict(self.non_rare_levels)
-        if not self.unseen_levels_to_rare:
+        if not self.unseen_levels_to_rare or self.unseen_level_name is not None:
             self.check_is_fitted(["training_data_levels"])
             json_dict["fit"]["training_data_levels"] = _sort_dict(
                 self.training_data_levels
@@ -322,6 +354,10 @@ class GroupRareLevelsTransformer(BaseTransformer, WeightColumnMixin):
         -------
             GroupRareLevelsTransformer: fitted class instance
 
+        Raises
+        ------
+        ValueError: if unseen_level_name collides with a non rare level in any fitted column
+
         Examples
         --------
         ```pycon
@@ -374,7 +410,7 @@ class GroupRareLevelsTransformer(BaseTransformer, WeightColumnMixin):
 
         level_weights_expr = nw.col(weights_column) / total_weight
 
-        if not self.unseen_levels_to_rare:
+        if not self.unseen_levels_to_rare or self.unseen_level_name is not None:
             self.training_data_levels = {}
         else:
             self.training_data_levels = None
@@ -401,6 +437,16 @@ class GroupRareLevelsTransformer(BaseTransformer, WeightColumnMixin):
 
             present_levels[c] = sorted(value for value in results[c].unique().to_list())
 
+            if (
+                self.unseen_level_name is not None
+                and self.unseen_level_name in self.non_rare_levels[c]
+            ):
+                msg = (
+                    f"{self.classname()}: unseen_level_name '{self.unseen_level_name}' "
+                    f"is a non rare level in column {c}"
+                )
+                raise ValueError(msg)
+
             if self.record_rare_levels:
                 self.rare_levels_record[c] = sorted(
                     set(present_levels[c]).difference(self.non_rare_levels[c]),
@@ -411,7 +457,7 @@ class GroupRareLevelsTransformer(BaseTransformer, WeightColumnMixin):
                     key=str,
                 )
 
-            if not self.unseen_levels_to_rare:
+            if not self.unseen_levels_to_rare or self.unseen_level_name is not None:
                 self.training_data_levels[c] = present_levels[c]
 
         self.is_fitted_ = True
@@ -484,6 +530,7 @@ class GroupRareLevelsTransformer(BaseTransformer, WeightColumnMixin):
             unseen_levels_to_rare=self.unseen_levels_to_rare,
             training_data_levels=self.training_data_levels,
             rare_level_name=self.rare_level_name,
+            unseen_level_name=self.unseen_level_name,
         )
 
         group_cat_enum_cols_expr = rare_encode_categorical_or_enum_columns(
@@ -492,6 +539,7 @@ class GroupRareLevelsTransformer(BaseTransformer, WeightColumnMixin):
             unseen_levels_to_rare=self.unseen_levels_to_rare,
             training_data_levels=self.training_data_levels,
             rare_level_name=self.rare_level_name,
+            unseen_level_name=self.unseen_level_name,
         )
 
         group_exprs = [
@@ -1431,6 +1479,13 @@ class OneHotEncodingTransformer(
     separator : str
         Separator used in naming for dummy columns.
 
+    additional_categories : dict or None
+        Optional extra levels to create fixed dummy columns for in every transform output,
+        even when the levels do not occur in the data a transform is applied to. This keeps
+        the output column set fixed, e.g. for rare and unseen level labels produced
+        upstream by GroupRareLevelsTransformer. Created in fit alongside the levels observed
+        during fit.
+
     built_from_json: bool
         indicates if transformer was reconstructed from json, which limits it's supported
         functionality to .transform
@@ -1465,7 +1520,7 @@ class OneHotEncodingTransformer(
     >>> # transformer can also be dumped to json and reinitialised
     >>> json_dump = transformer.to_json()
     >>> json_dump
-    {'tubular_version': ..., 'classname': 'OneHotEncodingTransformer', 'init': {'columns': ['a'], 'copy': False, 'verbose': False, 'return_native': True, 'wanted_values': None, 'separator': '_'}, 'fit': {'is_fitted_': True, 'categories_': {'a': ['x', 'y']}, 'new_feature_names_': {'a': ['a_x', 'a_y']}}}
+    {'tubular_version': ..., 'classname': 'OneHotEncodingTransformer', 'init': {'columns': ['a'], 'copy': False, 'verbose': False, 'return_native': True, 'wanted_values': None, 'additional_categories': None, 'separator': '_'}, 'fit': {'is_fitted_': True, 'categories_': {'a': ['x', 'y']}, 'new_feature_names_': {'a': ['a_x', 'a_y']}}}
 
     >>> OneHotEncodingTransformer.from_json(json_dump)
     OneHotEncodingTransformer(columns=['a'])
@@ -1490,6 +1545,7 @@ class OneHotEncodingTransformer(
         columns: str | ListOfStrs | None = None,
         wanted_values: dict[str, ListOfStrs] | None = None,
         separator: str = "_",
+        additional_categories: dict[str, ListOfStrs] | None = None,
         **kwargs: bool,
     ) -> None:
         """Initialise class instance.
@@ -1507,12 +1563,19 @@ class OneHotEncodingTransformer(
             Used to create dummy column names, the name will take
             the format [categorical feature][separator][category level]
 
+        additional_categories: dict[str, list[str]] or None, default = None
+            Optional extra levels to always create fixed dummy columns for, in addition to the
+            levels observed during fit (or specified in wanted_values). Useful for reserving fixed
+            columns for levels absent from training data, e.g. rare and unseen level labels
+            produced by GroupRareLevelsTransformer. It will take the format
+            {col1: [level_1, level_2, ...]}.
+
         **kwargs
             Arbitrary keyword arguments passed onto sklearn OneHotEncoder.init method.
 
         Raises
         ------
-        ValueError: if keys of wanted_values arg are not in columns arg
+        ValueError: if keys of wanted_values or additional_categories args are not in columns arg
 
         """
         BaseTransformer.__init__(
@@ -1525,8 +1588,15 @@ class OneHotEncodingTransformer(
             msg = f"{self.classname()}: keys of wanted values should match provided columns"
             raise ValueError(msg)
 
+        if additional_categories and not set(additional_categories.keys()).issubset(
+            set(self.columns)
+        ):
+            msg = f"{self.classname()}: keys of additional categories should be a subset of provided columns"
+            raise ValueError(msg)
+
         self.wanted_values = wanted_values
         self.separator = separator
+        self.additional_categories = additional_categories
 
     @block_from_json
     def to_json(self) -> dict[str, dict[str, Any]]:
@@ -1551,7 +1621,7 @@ class OneHotEncodingTransformer(
 
         >>> # version will vary for local vs CI, so use ... as generic match
         >>> transformer.to_json()
-        {'tubular_version': ..., 'classname': 'OneHotEncodingTransformer', 'init': {'columns': ['a'], 'copy': False, 'verbose': False, 'return_native': True, 'wanted_values': None, 'separator': '_'}, 'fit': {'is_fitted_': True, 'categories_': {'a': ['x', 'y']}, 'new_feature_names_': {'a': ['a_x', 'a_y']}}}
+        {'tubular_version': ..., 'classname': 'OneHotEncodingTransformer', 'init': {'columns': ['a'], 'copy': False, 'verbose': False, 'return_native': True, 'wanted_values': None, 'additional_categories': None, 'separator': '_'}, 'fit': {'is_fitted_': True, 'categories_': {'a': ['x', 'y']}, 'new_feature_names_': {'a': ['a_x', 'a_y']}}}
 
         ```
 
@@ -1563,6 +1633,7 @@ class OneHotEncodingTransformer(
         json_dict["init"].update(
             {
                 "wanted_values": self.wanted_values,
+                "additional_categories": self.additional_categories,
                 "separator": self.separator,
             },
         )
@@ -1702,10 +1773,22 @@ class OneHotEncodingTransformer(
 
             # if the user has provided a 'wanted_values' as a list of expected dummies,
             # then there is actually nothing we need to fit on data here
-            self.categories_[c] = (
+            observed_categories = (
                 sorted(category for category in non_null_results_list)
                 if not self.wanted_values
                 else self.wanted_values[c]
+            )
+
+            # merge in any fixed additional categories so dummy columns are
+            # generated even if these levels never occur in the fitted data
+            extra_categories = (
+                self.additional_categories.get(c, [])
+                if self.additional_categories
+                else []
+            )
+
+            self.categories_[c] = sorted(
+                set(observed_categories).union(extra_categories)
             )
 
             level_count = len(self.categories_[c])

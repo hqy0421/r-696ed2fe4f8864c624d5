@@ -3,6 +3,7 @@ import pytest
 from sklearn.pipeline import Pipeline
 
 from tubular.imputers import MeanImputer, MedianImputer
+from tubular.nominal import GroupRareLevelsTransformer, OneHotEncodingTransformer
 from tubular.pipeline import dump_pipeline_to_json, load_pipeline_from_json
 
 
@@ -114,3 +115,85 @@ class TestPipelineDumpAndLoadJson:
             RuntimeError,
         ):
             dump_pipeline_to_json(original_pipeline)
+
+    def test_rare_and_one_hot_pipeline_round_trip_keeps_signals_distinct(self):
+        """Trade areas grouped as rare in training and unseen trade areas at scoring
+        remain distinct signals, with a fixed output column set, after json round trip."""
+
+        train = pl.DataFrame(
+            {
+                "trade_area": [
+                    "a",
+                    "a",
+                    "a",
+                    "b",
+                    "b",
+                    "c",
+                    "d",
+                    "e",
+                    "a",
+                    "b",
+                ],
+            }
+        )
+
+        pipeline = Pipeline(
+            [
+                (
+                    "rare",
+                    GroupRareLevelsTransformer(
+                        columns=["trade_area"],
+                        cut_off_percent=0.15,
+                        unseen_level_name="unseen",
+                    ),
+                ),
+                (
+                    "one_hot",
+                    OneHotEncodingTransformer(
+                        columns=["trade_area"],
+                        additional_categories={"trade_area": ["rare", "unseen"]},
+                    ),
+                ),
+            ]
+        )
+
+        pipeline.fit(train)
+
+        score = pl.DataFrame(
+            {
+                "trade_area": [
+                    "a",  # frequent, non rare
+                    "c",  # rare during training
+                    "new_mall",  # unseen at training time
+                ],
+            }
+        )
+
+        expected_columns = [
+            "trade_area",
+            "trade_area_a",
+            "trade_area_b",
+            "trade_area_rare",
+            "trade_area_unseen",
+        ]
+
+        pre_dump_output = pipeline.transform(score)
+
+        assert pre_dump_output.columns == expected_columns
+
+        pre_dump_rows = pre_dump_output.to_dicts()
+
+        loaded_pipeline = load_pipeline_from_json(dump_pipeline_to_json(pipeline))
+
+        loaded_output = loaded_pipeline.transform(score)
+
+        assert loaded_output.columns == expected_columns
+
+        assert loaded_output.to_dicts() == pre_dump_rows
+
+        # the two signals are different columns with different values
+        rare_col = [row["trade_area_rare"] for row in pre_dump_rows]
+        unseen_col = [row["trade_area_unseen"] for row in pre_dump_rows]
+
+        assert rare_col == [False, True, False]
+        assert unseen_col == [False, False, True]

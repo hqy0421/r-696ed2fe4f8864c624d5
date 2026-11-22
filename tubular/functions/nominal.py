@@ -15,6 +15,7 @@ def _get_non_rare_condition_expression(
     non_rare_levels: dict[str, ListOfStrs],
     unseen_levels_to_rare: bool,
     training_data_levels: dict[str, ListOfStrs] | None,
+    unseen_level_name: str | None = None,
 ) -> nw.Expr:
     """Get expression for non rare condition.
 
@@ -32,11 +33,21 @@ def _get_non_rare_condition_expression(
     training_data_levels:
         dict of training data levels per column
 
+    unseen_level_name:
+        name to map unseen levels to when they are kept separate from
+        levels grouped as rare during training. If None, unseen levels are
+        handled according to unseen_levels_to_rare.
+
     Returns
     -------
     nw.Expr: expression for non rare condition
 
     """
+    # when unseen levels get their own label, only levels observed during
+    # training and learnt as non rare are kept unchanged
+    if unseen_level_name:
+        return nw.col(col).is_in(non_rare_levels[col])
+
     return (
         nw.col(col).is_in(non_rare_levels[col])
         if unseen_levels_to_rare
@@ -52,11 +63,13 @@ def _get_non_rare_condition_expression(
 
 
 @beartype
-def _get_rare_grouping_expr(
+def _get_rare_grouping_expr(  # noqa: PLR0913, PLR0917
     col: str,
     rare_level_name: str | ListOfStrs,
     non_rare_condition_expression: nw.Expr,
     pre_grouping_expr: nw.Expr,
+    unseen_level_name: str | None = None,
+    training_data_levels: dict[str, ListOfStrs] | None = None,
 ) -> nw.Expr:
     """Get expression for mapping column.
 
@@ -74,25 +87,48 @@ def _get_rare_grouping_expr(
     pre_grouping_expr:
         expression to apply before rare grouping
 
+    unseen_level_name:
+        name to map unseen levels to when they are kept separate from
+        levels grouped as rare during training. If None, all levels that
+        fail the non rare condition are mapped to rare_level_name.
+
+    training_data_levels:
+        dict of training data levels per column, required when
+        unseen_level_name is provided to tell levels grouped as rare during
+        training apart from unseen levels.
+
     Returns
     -------
     list[nw.Expr]: expressions for transformation
 
     """
+    if not unseen_level_name:
+        return (
+            nw.when(non_rare_condition_expression | nw.col(col).is_null())
+            .then(pre_grouping_expr)
+            .otherwise(nw.lit(rare_level_name))
+        )
+
+    # levels that fail the non rare condition are either levels observed
+    # during training but grouped as rare, which keep rare_level_name,
+    # or unseen levels, which receive their own label
     return (
         nw.when(non_rare_condition_expression | nw.col(col).is_null())
         .then(pre_grouping_expr)
-        .otherwise(nw.lit(rare_level_name))
+        .when(nw.col(col).is_in(training_data_levels[col]))
+        .then(nw.lit(rare_level_name))
+        .otherwise(nw.lit(unseen_level_name))
     )
 
 
 @beartype
-def rare_encode_categorical_or_enum_columns(
+def rare_encode_categorical_or_enum_columns(  # noqa: PLR0913, PLR0917
     cols: list[str],
     non_rare_levels: dict[str, ListOfStrs],
     unseen_levels_to_rare: bool,
     training_data_levels: dict[str, ListOfStrs] | None,
     rare_level_name: str | ListOfStrs,
+    unseen_level_name: str | None = None,
 ) -> list[nw.Expr]:
     """Get expression for applying rare grouping to categorical or enum columns.
 
@@ -113,6 +149,11 @@ def rare_encode_categorical_or_enum_columns(
     rare_level_name:
         name to use for rare levels
 
+    unseen_level_name:
+        name to use for unseen levels when they are kept separate from rare
+        levels. If None, unseen levels are handled according to
+        unseen_levels_to_rare.
+
     Returns
     -------
     list[nw.Expr]: expressions for transformation
@@ -125,27 +166,34 @@ def rare_encode_categorical_or_enum_columns(
             non_rare_levels=non_rare_levels,
             unseen_levels_to_rare=unseen_levels_to_rare,
             training_data_levels=training_data_levels,
+            unseen_level_name=unseen_level_name,
         )
         grouped_expression = _get_rare_grouping_expr(
             col,
             rare_level_name=rare_level_name,
             non_rare_condition_expression=non_rare_condition_expression,
             pre_grouping_expr=nw.col(col).cast(nw.String),
+            unseen_level_name=unseen_level_name,
+            training_data_levels=training_data_levels,
         )
+        enum_categories = [*non_rare_levels[col], rare_level_name]
+        if unseen_level_name:
+            enum_categories += [unseen_level_name]
         grouped_expressions.append(
             grouped_expression.cast(
-                nw.Enum(non_rare_levels[col] + [rare_level_name]),
+                nw.Enum(enum_categories),
             )
         )
     return grouped_expressions
 
 
-def rare_encode_str_columns(
+def rare_encode_str_columns(  # noqa: PLR0913, PLR0917
     cols: list[str],
-    non_rare_levels: dict,
+    non_rare_levels: dict[str, ListOfStrs],
     unseen_levels_to_rare: bool,
     training_data_levels: dict[set] | None,
     rare_level_name: str | ListOfStrs,
+    unseen_level_name: str | None = None,
 ) -> list[nw.Expr]:
     """Get expression for applying rare grouping to string columns.
 
@@ -166,6 +214,11 @@ def rare_encode_str_columns(
     rare_level_name:
         name to use for rare levels
 
+    unseen_level_name:
+        name to use for unseen levels when they are kept separate from rare
+        levels. If None, unseen levels are handled according to
+        unseen_levels_to_rare.
+
     Returns
     -------
     list[nw.Expr]: expressions for transformation
@@ -178,6 +231,7 @@ def rare_encode_str_columns(
             non_rare_levels=non_rare_levels,
             unseen_levels_to_rare=unseen_levels_to_rare,
             training_data_levels=training_data_levels,
+            unseen_level_name=unseen_level_name,
         )
         grouped_expressions.append(
             _get_rare_grouping_expr(
@@ -185,6 +239,8 @@ def rare_encode_str_columns(
                 rare_level_name=rare_level_name,
                 non_rare_condition_expression=non_rare_condition_expression,
                 pre_grouping_expr=nw.col(col),
+                unseen_level_name=unseen_level_name,
+                training_data_levels=training_data_levels,
             )
         )
     return grouped_expressions

@@ -139,6 +139,99 @@ class TestInit(
         ):
             uninitialized_transformers[self.transformer_name](**args)
 
+    @pytest.mark.parametrize(
+        "additional_categories",
+        ["a", ["a", "b"], 123, True],
+    )
+    def test_additional_categories_is_dict(
+        self, additional_categories, minimal_attribute_dict
+    ):
+        """Test an error is raised if additional_categories is not a dict."""
+        args = minimal_attribute_dict[self.transformer_name]
+        args["additional_categories"] = additional_categories
+
+        with pytest.raises(
+            BeartypeCallHintParamViolation,
+        ):
+            OneHotEncodingTransformer(**args)
+
+    @pytest.mark.parametrize(
+        "additional_categories",
+        [
+            {1: ["a"]},
+            {True: ["a"]},
+            {("a",): ["b"]},
+        ],
+    )
+    def test_additional_categories_key_is_str(
+        self, additional_categories, minimal_attribute_dict
+    ):
+        """Test an error is raised if additional_categories keys are not str."""
+        args = minimal_attribute_dict[self.transformer_name]
+        args["additional_categories"] = additional_categories
+
+        with pytest.raises(
+            BeartypeCallHintParamViolation,
+        ):
+            OneHotEncodingTransformer(**args)
+
+    @pytest.mark.parametrize(
+        "additional_categories",
+        [
+            {"a": "b"},
+            {"a": ("a", "b")},
+            {"a": True},
+            {"a": 123},
+        ],
+    )
+    def test_additional_categories_value_is_list(
+        self, additional_categories, minimal_attribute_dict
+    ):
+        """Test an error is raised if additional_categories values are not lists."""
+        args = minimal_attribute_dict[self.transformer_name]
+        args["additional_categories"] = additional_categories
+
+        with pytest.raises(
+            BeartypeCallHintParamViolation,
+        ):
+            OneHotEncodingTransformer(**args)
+
+    @pytest.mark.parametrize(
+        "additional_categories",
+        [
+            {"a": ["b", 123]},
+            {"a": ["b", True]},
+            {"a": ["b", None]},
+            {"a": ["b", ["a", "b"]]},
+        ],
+    )
+    def test_additional_categories_entries_are_str(
+        self, additional_categories, minimal_attribute_dict
+    ):
+        """Test an error is raised if additional_categories list entries are not str."""
+        args = minimal_attribute_dict[self.transformer_name]
+        args["additional_categories"] = additional_categories
+
+        with pytest.raises(
+            BeartypeCallHintParamViolation,
+        ):
+            OneHotEncodingTransformer(**args)
+
+    def test_additional_categories_keys_not_in_columns_error(
+        self, minimal_attribute_dict
+    ):
+        """Test an error is raised if additional_categories keys are not a subset of columns."""
+        args = minimal_attribute_dict[self.transformer_name]
+        args["columns"] = ["a", "b"]
+        args["additional_categories"] = {"c": ["x"], "a": ["y"]}
+
+        msg = (
+            f"{self.transformer_name}: keys of additional categories should be a subset "
+            "of provided columns"
+        )
+        with pytest.raises(ValueError, match=msg):
+            OneHotEncodingTransformer(**args)
+
 
 class TestFit(GenericFitTests):
     """Generic tests for transformer.fit()"""
@@ -213,6 +306,53 @@ class TestFit(GenericFitTests):
             return
 
         transformer.fit(_convert_to_lazy(df, lazy=lazy))
+
+    @pytest.mark.parametrize("lazy", [True, False])
+    @pytest.mark.parametrize(
+        "library",
+        ["pandas", "polars"],
+    )
+    def test_additional_categories_added_to_categories(self, library, lazy):
+        """Test fit merges additional_categories into categories, including levels absent from training data."""
+        df = d.create_df_7(library=library)
+
+        transformer = OneHotEncodingTransformer(
+            columns=["b"],
+            additional_categories={"b": ["rare", "unseen"]},
+        )
+
+        if _check_if_skip_test(transformer, df, lazy=lazy):
+            return
+
+        transformer.fit(_convert_to_lazy(df, lazy=lazy))
+
+        assert transformer.categories_ == {"b": ["rare", "unseen", "x", "y", "z"]}
+
+        assert transformer.new_feature_names_ == {
+            "b": ["b_rare", "b_unseen", "b_x", "b_y", "b_z"]
+        }
+
+    @pytest.mark.parametrize("lazy", [True, False])
+    @pytest.mark.parametrize(
+        "library",
+        ["pandas", "polars"],
+    )
+    def test_additional_categories_works_with_wanted_values(self, library, lazy):
+        """Test additional_categories extends an explicit wanted_values category list."""
+        df = d.create_df_7(library=library)
+
+        transformer = OneHotEncodingTransformer(
+            columns=["b"],
+            wanted_values={"b": ["x"]},
+            additional_categories={"b": ["rare", "unseen"]},
+        )
+
+        if _check_if_skip_test(transformer, df, lazy=lazy):
+            return
+
+        transformer.fit(_convert_to_lazy(df, lazy=lazy))
+
+        assert transformer.categories_ == {"b": ["rare", "unseen", "x"]}
 
 
 class TestTransform(
@@ -466,6 +606,72 @@ class TestTransform(
             assert_frame_equal_dispatch(
                 _collect_frame(df_transformed_row, lazy=lazy)[column_order],
                 df_expected_row,
+            )
+
+    @pytest.mark.parametrize("lazy", [True, False])
+    @pytest.mark.parametrize("from_json", [True, False])
+    @pytest.mark.parametrize(
+        "library",
+        ["pandas", "polars"],
+    )
+    def test_transform_output_with_additional_categories(
+        self, library, from_json, lazy
+    ):
+        """Test additional_categories produce fixed zero-filled columns, even when absent from transformed data."""
+        df_train = d.create_df_7(library=library)
+
+        transformer = OneHotEncodingTransformer(
+            columns=["b"],
+            additional_categories={"b": ["rare", "unseen"]},
+        )
+
+        if _check_if_skip_test(transformer, df_train, lazy=lazy, from_json=from_json):
+            return
+
+        transformer.fit(df_train)
+        transformer = _handle_from_json(transformer, from_json)
+
+        df_test = d.create_df_8(library=library)
+
+        df_transformed = transformer.transform(_convert_to_lazy(df_test, lazy=lazy))
+
+        expected_df_dict = {
+            "a": [1, 5, 2, 3, 3],
+            "b": ["w", "w", "z", "y", "x"],
+            "c": ["a", "a", "c", "b", "a"],
+            "b_rare": [0] * 5,
+            "b_unseen": [0] * 5,
+            "b_x": [0, 0, 0, 0, 1],
+            "b_y": [0, 0, 0, 1, 0],
+            "b_z": [0, 0, 1, 0, 0],
+        }
+        expected_df = dataframe_init_dispatch(
+            library=library,
+            dataframe_dict=expected_df_dict,
+        )
+        expected_df = nw.from_native(expected_df)
+        for col_name in ["b_rare", "b_unseen", "b_x", "b_y", "b_z"]:
+            expected_df = expected_df.with_columns(
+                nw.col(col_name).cast(nw.Boolean),
+            )
+        expected_df = expected_df.with_columns(
+            nw.col("c").cast(nw.Categorical),
+        )
+
+        assert_frame_equal_dispatch(
+            _collect_frame(df_transformed, lazy=lazy), expected_df.to_native()
+        )
+
+        # single row data still gets the full fixed column set
+        single_row = df_train.head(1)
+        single_row_out = _collect_frame(
+            transformer.transform(_convert_to_lazy(single_row, lazy=lazy)),
+            lazy=lazy,
+        )
+
+        for fixed_col in ["b_rare", "b_unseen"]:
+            assert fixed_col in single_row_out.columns, (
+                f"fixed additional category column {fixed_col} missing from transform output"
             )
 
     @pytest.mark.parametrize("lazy", [True, False])
